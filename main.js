@@ -309,6 +309,42 @@ function parseCSV(text) {
     return data;
 }
 
+// 检测第一个part的最大小节号（第一个曲子的结束小节）
+function detectMaxMeasureNumber() {
+    if (!musicXmlData) {
+        return null;
+    }
+    
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(musicXmlData, 'text/xml');
+    
+    // 获取第一个part的所有measure
+    const part1 = xmlDoc.querySelector('part[id="P1"]');
+    if (!part1) return null;
+    
+    const part1Measures = part1.getElementsByTagName('measure');
+    if (part1Measures.length === 0) return null;
+    
+    // 找到第一个曲子的最大小节号（当小节号重新从1开始时，说明新曲子开始了）
+    let maxMeasureNum = 0;
+    let previousMeasureNum = 0;
+    
+    for (let i = 0; i < part1Measures.length; i++) {
+        const measureNum = parseInt(part1Measures[i].getAttribute('number'));
+        
+        // 如果小节号小于等于前一个小节号，说明新曲子开始了
+        if (measureNum <= previousMeasureNum && previousMeasureNum > 0) {
+            break;
+        }
+        
+        maxMeasureNum = Math.max(maxMeasureNum, measureNum);
+        previousMeasureNum = measureNum;
+    }
+    
+    console.log(`检测到第一个曲子的最大小节号: ${maxMeasureNum}`);
+    return maxMeasureNum;
+}
+
 // 根据窗口宽度重新组织系统
 function reorganizeSystemsByWindowWidth() {
     if (!musicXmlData) {
@@ -325,6 +361,10 @@ function reorganizeSystemsByWindowWidth() {
     
     const part1Measures = part1.getElementsByTagName('measure');
     if (part1Measures.length === 0) return;
+    
+    // 检测第一个曲子的最大小节号
+    const maxMeasureNum = detectMaxMeasureNumber();
+    window.maxMeasureNumber = maxMeasureNum; // 存储到全局变量
     
     // 获取容器宽度（优先使用容器，如果容器不存在则使用窗口宽度）
     let containerWidth = window.innerWidth;
@@ -356,9 +396,74 @@ function reorganizeSystemsByWindowWidth() {
     // 每个系统从计算出的初始小节数开始，然后根据换行条件往下减
     let currentSystemIndex = 0;
     let currentSystemMeasures = [];
+    let isNewPiece = false; // 标记是否是新曲子
     
     for (let i = 0; i < part1Measures.length; i++) {
         const measure = part1Measures[i];
+        const measureNum = parseInt(measure.getAttribute('number'));
+        
+        // 检查是否到达第一个曲子的最大小节号
+        if (maxMeasureNum && measureNum > maxMeasureNum) {
+            // 如果当前系统有未完成的小节，先完成当前系统
+            if (currentSystemMeasures.length > 0) {
+                systems.push({
+                    index: currentSystemIndex,
+                    measures: [...currentSystemMeasures],
+                    startMeasure: currentSystemMeasures[0],
+                    endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1],
+                    isNewPiece: false
+                });
+                
+                currentSystemMeasures.forEach(m => {
+                    measureToSystemMap.set(parseInt(m.getAttribute('number')), currentSystemIndex);
+                });
+                
+                console.log(`系统 ${currentSystemIndex}: 在最大小节号 ${maxMeasureNum} 处停止，包含 ${currentSystemMeasures.length} 个小节`);
+                currentSystemIndex++;
+                currentSystemMeasures = [];
+            }
+            
+            // 标记下一个系统是新曲子
+            isNewPiece = true;
+            console.log(`检测到新曲子开始，小节号从 ${measureNum} 重新开始`);
+        }
+        
+        // 检查是否正好到达最大小节号，如果到达，添加后立即创建系统
+        if (maxMeasureNum && measureNum === maxMeasureNum) {
+            currentSystemMeasures.push(measure);
+            
+            // 立即创建系统，停止当前曲子
+            if (currentSystemMeasures.length > 0) {
+                const startNum = parseInt(currentSystemMeasures[0].getAttribute('number'));
+                const endNum = parseInt(currentSystemMeasures[currentSystemMeasures.length - 1].getAttribute('number'));
+                systems.push({
+                    index: currentSystemIndex,
+                    measures: [...currentSystemMeasures],
+                    startMeasure: currentSystemMeasures[0],
+                    endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1],
+                    isNewPiece: false
+                });
+                
+                currentSystemMeasures.forEach(m => {
+                    measureToSystemMap.set(parseInt(m.getAttribute('number')), currentSystemIndex);
+                });
+                
+                console.log(`系统 ${currentSystemIndex}: 在最大小节号 ${maxMeasureNum} 处停止，包含小节 ${startNum} 到 ${endNum}（共 ${currentSystemMeasures.length} 个小节）`);
+                currentSystemIndex++;
+                currentSystemMeasures = [];
+            }
+            
+            // 标记下一个系统是新曲子
+            isNewPiece = true;
+            continue; // 跳过当前小节，从下一个开始（新曲子）
+        }
+        
+        // 检查是否是新曲子的开始（小节号重新从1或较小的数字开始）
+        if (isNewPiece && measureNum <= 10 && currentSystemMeasures.length === 0) {
+            // 新曲子的第一个小节
+            console.log(`系统 ${currentSystemIndex}: 新章节开始，小节 ${measureNum}`);
+        }
+        
         currentSystemMeasures.push(measure);
         
         // 当达到计算出的初始小节数时，创建新系统（必须正好达到）
@@ -367,7 +472,8 @@ function reorganizeSystemsByWindowWidth() {
                 index: currentSystemIndex,
                 measures: [...currentSystemMeasures],
                 startMeasure: currentSystemMeasures[0],
-                endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1]
+                endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1],
+                isNewPiece: isNewPiece
             });
             
             // 更新measure到系统的映射
@@ -375,8 +481,15 @@ function reorganizeSystemsByWindowWidth() {
                 measureToSystemMap.set(parseInt(m.getAttribute('number')), currentSystemIndex);
             });
             
+            // 如果这是新曲子的第一个系统，输出提示
+            if (isNewPiece && currentSystemIndex === systems.length - 1) {
+                const startNum = parseInt(currentSystemMeasures[0].getAttribute('number'));
+                console.log(`系统 ${currentSystemIndex}: 新章节开始，小节 ${startNum} 到 ${parseInt(currentSystemMeasures[currentSystemMeasures.length - 1].getAttribute('number'))}`);
+            }
+            
             currentSystemIndex++;
             currentSystemMeasures = [];
+            isNewPiece = false; // 重置标记，后续系统不再是新曲子的开始
         }
     }
     
@@ -387,14 +500,20 @@ function reorganizeSystemsByWindowWidth() {
             index: currentSystemIndex,
             measures: [...currentSystemMeasures],
             startMeasure: currentSystemMeasures[0],
-            endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1]
+            endMeasure: currentSystemMeasures[currentSystemMeasures.length - 1],
+            isNewPiece: isNewPiece
         });
         
         currentSystemMeasures.forEach(m => {
             measureToSystemMap.set(parseInt(m.getAttribute('number')), currentSystemIndex);
         });
         
-        console.log(`最后一个系统包含 ${currentSystemMeasures.length} 个小节（不足 ${measuresPerSystemClamped} 个，这是正常的）`);
+        if (isNewPiece) {
+            const startNum = parseInt(currentSystemMeasures[0].getAttribute('number'));
+            console.log(`最后一个系统（新章节）包含 ${currentSystemMeasures.length} 个小节，从小节 ${startNum} 开始`);
+        } else {
+            console.log(`最后一个系统包含 ${currentSystemMeasures.length} 个小节（不足 ${measuresPerSystemClamped} 个，这是正常的）`);
+        }
     }
     
     // 更新全局systems引用
@@ -620,7 +739,7 @@ function detectLineBreak(systemIndex) {
             
             // 如果相对位置突然变小（说明换行了），或者x坐标变小
             if (currPos.relativeX < prevPos.relativeX - 5 || currPos.x < prevPos.x - 5) {
-                console.log(`系统 ${systemIndex}: 检测到换行在小节 ${currPos.measureNumber}`);
+                console.log(`系统 ${systemIndex}: 检测到换行在小节 ${currPos.measureNumber} (相对位置: ${prevPos.relativeX} -> ${currPos.relativeX})`);
                 return true;
             }
         }
@@ -629,13 +748,35 @@ function detectLineBreak(systemIndex) {
         const containerWidth = scoreDiv.offsetWidth;
         const svgBbox = svg.getBBox();
         const svgWidth = svgBbox.width;
+        const svgHeight = svgBbox.height;
+        
+        // 如果SVG宽度明显超出容器宽度，可能有换行
+        // 允许一些误差（10%），因为SVG可能有padding
+        if (containerWidth > 0 && svgWidth > containerWidth * 1.1) {
+            console.log(`系统 ${systemIndex}: SVG宽度超出容器 (SVG: ${svgWidth}px, 容器: ${containerWidth}px)，可能换行`);
+            return true;
+        }
         
         // 如果SVG高度明显大于正常高度，可能有换行
-        const svgHeight = svgBbox.height;
         // 正常单行乐谱高度通常在200-300px左右，如果超过400px可能有换行
         if (svgHeight > 400 && measurePositions.length > 1) {
             console.log(`系统 ${systemIndex}: SVG高度异常 (${svgHeight}px)，可能换行`);
             return true;
+        }
+        
+        // 新增：检测小节密度是否过高（如果小节太多，即使没有明显的换行标志，也可能需要换行）
+        // 计算平均每个小节占用的宽度
+        if (measurePositions.length > 0 && containerWidth > 0) {
+            const totalRelativeWidth = measurePositions[measurePositions.length - 1].relativeX + 
+                                      (measurePositions[measurePositions.length - 1].width || 0);
+            const avgMeasureWidth = totalRelativeWidth / measurePositions.length;
+            const estimatedTotalWidth = avgMeasureWidth * measurePositions.length;
+            
+            // 如果估算的总宽度明显超出容器宽度，可能需要换行
+            if (estimatedTotalWidth > containerWidth * 1.2) {
+                console.log(`系统 ${systemIndex}: 小节密度过高 (估算宽度: ${estimatedTotalWidth}px, 容器: ${containerWidth}px, 小节数: ${measurePositions.length})，可能换行`);
+                return true;
+            }
         }
         
         return false;
@@ -655,8 +796,41 @@ function adjustSystemMeasures(systemIndex) {
         return false;
     }
     
+    // 检查系统是否包含最大小节号（第一个曲子的结束），如果是，不应该调整
+    const maxMeasureNum = window.maxMeasureNumber;
+    const systemEndMeasure = parseInt(system.endMeasure.getAttribute('number'));
+    if (maxMeasureNum && systemEndMeasure === maxMeasureNum) {
+        console.log(`系统 ${systemIndex}: 包含最大小节号 ${maxMeasureNum}，不应该调整`);
+        return false;
+    }
+    
     // 获取初始小节数（如果存在）
     const initialMeasures = window.initialMeasuresPerSystem || 7;
+    
+    // 安全检查：如果系统小节数异常多（超过初始小节数的3倍），强制重置
+    if (system.measures.length > initialMeasures * 3) {
+        console.error(`系统 ${systemIndex}: 小节数异常（${system.measures.length}个），强制重置为初始小节数 ${initialMeasures}`);
+        const startMeasure = system.startMeasure;
+        const endMeasureNum = parseInt(startMeasure.getAttribute('number')) + initialMeasures - 1;
+        
+        // 查找所有小节，只保留前initialMeasures个
+        const allMeasures = Array.from(system.measures);
+        system.measures = allMeasures.slice(0, initialMeasures);
+        system.endMeasure = system.measures[system.measures.length - 1];
+        
+        // 更新映射：移除超出的小节
+        for (let i = initialMeasures; i < allMeasures.length; i++) {
+            measureToSystemMap.delete(parseInt(allMeasures[i].getAttribute('number')));
+        }
+        
+        // 更新映射：确保保留的小节正确映射
+        system.measures.forEach(m => {
+            measureToSystemMap.set(parseInt(m.getAttribute('number')), systemIndex);
+        });
+        
+        console.log(`系统 ${systemIndex}: 已重置为 ${system.measures.length} 个小节`);
+        return true;
+    }
     
     // 移除最后一个小节
     const removedMeasure = system.measures.pop();
@@ -667,48 +841,133 @@ function adjustSystemMeasures(systemIndex) {
     
     console.log(`系统 ${systemIndex}: 移除小节 ${removedMeasure.getAttribute('number')}，现在包含 ${system.measures.length} 个小节（从初始 ${initialMeasures} 个减少）`);
     
+    // 获取移除的小节号
+    const removedMeasureNum = parseInt(removedMeasure.getAttribute('number'));
+    
+    // 检查是否到达最大小节号（第一个曲子的结束）
+    if (maxMeasureNum && removedMeasureNum >= maxMeasureNum) {
+        // 如果移除的小节是最大小节号或之后的小节，说明已经到达第一个曲子的结束
+        // 不应该将这个小节添加到其他系统，而是应该创建新系统（新章节）
+        const newSystemIndex = systems.length;
+        systems.push({
+            index: newSystemIndex,
+            measures: [removedMeasure],
+            startMeasure: removedMeasure,
+            endMeasure: removedMeasure,
+            isNewPiece: true // 标记为新章节
+        });
+        measureToSystemMap.set(removedMeasureNum, newSystemIndex);
+        console.log(`到达最大小节号 ${maxMeasureNum}，创建新系统 ${newSystemIndex}（新章节）来容纳小节 ${removedMeasureNum}`);
+        window.systems = systems;
+        return true;
+    }
+    
     // 如果有下一个系统，尝试将移除的小节添加到下一个未满的系统
     if (systemIndex + 1 < systems.length) {
-        // 查找下一个未满的系统（少于初始小节数）
-        let foundTargetSystem = false;
-        for (let i = systemIndex + 1; i < systems.length; i++) {
-            const targetSystem = systems[i];
-            if (targetSystem.measures.length < initialMeasures) {
-                // 找到未满的系统，在开头插入移除的小节
-                targetSystem.measures.unshift(removedMeasure);
-                targetSystem.startMeasure = removedMeasure;
-                measureToSystemMap.set(parseInt(removedMeasure.getAttribute('number')), i);
-                console.log(`系统 ${i}: 添加小节 ${removedMeasure.getAttribute('number')} 到开头，现在包含 ${targetSystem.measures.length} 个小节`);
-                foundTargetSystem = true;
-                break;
+        // 优先查找下一个系统（systemIndex + 1），如果它未满，添加到开头
+        const nextSystem = systems[systemIndex + 1];
+        if (nextSystem && nextSystem.measures.length < initialMeasures) {
+            // 检查小节是否连续：移除的小节号应该等于下一个系统的起始小节号 - 1
+            const nextSystemStartNum = parseInt(nextSystem.startMeasure.getAttribute('number'));
+            if (removedMeasureNum === nextSystemStartNum - 1) {
+                // 小节连续，添加到开头
+                nextSystem.measures.unshift(removedMeasure);
+                nextSystem.startMeasure = removedMeasure;
+                measureToSystemMap.set(removedMeasureNum, systemIndex + 1);
+                console.log(`系统 ${systemIndex + 1}: 添加小节 ${removedMeasureNum} 到开头（连续），现在包含 ${nextSystem.measures.length} 个小节`);
+            } else {
+                // 小节不连续，添加到末尾（如果未满）
+                if (nextSystem.measures.length < initialMeasures) {
+                    nextSystem.measures.push(removedMeasure);
+                    nextSystem.endMeasure = removedMeasure;
+                    measureToSystemMap.set(removedMeasureNum, systemIndex + 1);
+                    console.log(`系统 ${systemIndex + 1}: 添加小节 ${removedMeasureNum} 到末尾（不连续），现在包含 ${nextSystem.measures.length} 个小节`);
+                } else {
+                    // 下一个系统已满，查找其他未满的系统
+                    let foundTargetSystem = false;
+                    for (let i = systemIndex + 2; i < systems.length; i++) {
+                        const targetSystem = systems[i];
+                        if (targetSystem.measures.length < initialMeasures) {
+                            targetSystem.measures.unshift(removedMeasure);
+                            targetSystem.startMeasure = removedMeasure;
+                            measureToSystemMap.set(removedMeasureNum, i);
+                            console.log(`系统 ${i}: 添加小节 ${removedMeasureNum} 到开头，现在包含 ${targetSystem.measures.length} 个小节`);
+                            foundTargetSystem = true;
+                            break;
+                        }
+                    }
+                    
+                    // 如果所有后续系统都已满，添加到最后一个系统（如果未满）
+                    if (!foundTargetSystem) {
+                        const lastSystem = systems[systems.length - 1];
+                        if (lastSystem.measures.length < initialMeasures) {
+                            lastSystem.measures.push(removedMeasure);
+                            lastSystem.endMeasure = removedMeasure;
+                            measureToSystemMap.set(removedMeasureNum, systems.length - 1);
+                            console.log(`所有后续系统都已满，将小节 ${removedMeasureNum} 添加到最后一个系统 ${systems.length - 1}，现在包含 ${lastSystem.measures.length} 个小节`);
+                        } else {
+                            // 最后一个系统也满了，创建新系统
+                            const newSystemIndex = systems.length;
+                            systems.push({
+                                index: newSystemIndex,
+                                measures: [removedMeasure],
+                                startMeasure: removedMeasure,
+                                endMeasure: removedMeasure
+                            });
+                            measureToSystemMap.set(removedMeasureNum, newSystemIndex);
+                            console.log(`所有系统都已满（${initialMeasures}个小节），创建新系统 ${newSystemIndex} 来容纳小节 ${removedMeasureNum}`);
+                        }
+                    }
+                }
+            }
+        } else {
+            // 下一个系统已满，查找其他未满的系统
+            let foundTargetSystem = false;
+            for (let i = systemIndex + 2; i < systems.length; i++) {
+                const targetSystem = systems[i];
+                if (targetSystem.measures.length < initialMeasures) {
+                    targetSystem.measures.unshift(removedMeasure);
+                    targetSystem.startMeasure = removedMeasure;
+                    measureToSystemMap.set(removedMeasureNum, i);
+                    console.log(`系统 ${i}: 添加小节 ${removedMeasureNum} 到开头，现在包含 ${targetSystem.measures.length} 个小节`);
+                    foundTargetSystem = true;
+                    break;
+                }
+            }
+            
+            // 如果所有后续系统都已满，添加到最后一个系统（如果未满）
+            if (!foundTargetSystem) {
+                const lastSystem = systems[systems.length - 1];
+                if (lastSystem.measures.length < initialMeasures) {
+                    lastSystem.measures.push(removedMeasure);
+                    lastSystem.endMeasure = removedMeasure;
+                    measureToSystemMap.set(removedMeasureNum, systems.length - 1);
+                    console.log(`所有后续系统都已满，将小节 ${removedMeasureNum} 添加到最后一个系统 ${systems.length - 1}，现在包含 ${lastSystem.measures.length} 个小节`);
+                } else {
+                    // 最后一个系统也满了，创建新系统
+                    const newSystemIndex = systems.length;
+                    systems.push({
+                        index: newSystemIndex,
+                        measures: [removedMeasure],
+                        startMeasure: removedMeasure,
+                        endMeasure: removedMeasure
+                    });
+                    measureToSystemMap.set(removedMeasureNum, newSystemIndex);
+                    console.log(`所有系统都已满（${initialMeasures}个小节），创建新系统 ${newSystemIndex} 来容纳小节 ${removedMeasureNum}`);
+                }
             }
         }
-        
-        // 如果所有后续系统都已满（达到初始小节数），将小节添加到最后一个系统的末尾
-        // 这样在后续调整时，这个小节会被重新分配，而不是创建只有1个小节的新系统
-        if (!foundTargetSystem) {
-            const lastSystem = systems[systems.length - 1];
-            lastSystem.measures.push(removedMeasure);
-            lastSystem.endMeasure = removedMeasure;
-            measureToSystemMap.set(parseInt(removedMeasure.getAttribute('number')), systems.length - 1);
-            console.log(`所有后续系统都已满（${initialMeasures}个小节），将小节 ${removedMeasure.getAttribute('number')} 添加到最后一个系统 ${systems.length - 1}，现在包含 ${lastSystem.measures.length} 个小节（将等待后续调整）`);
-        }
     } else {
-        // 如果没有下一个系统，将小节添加到最后一个系统的末尾
-        // 这样在后续调整时，这个小节会被重新分配
-        const lastSystem = systems[systems.length - 1];
-        if (lastSystem !== system) {
-            lastSystem.measures.push(removedMeasure);
-            lastSystem.endMeasure = removedMeasure;
-            measureToSystemMap.set(parseInt(removedMeasure.getAttribute('number')), systems.length - 1);
-            console.log(`没有下一个系统，将小节 ${removedMeasure.getAttribute('number')} 添加到最后一个系统 ${systems.length - 1}，现在包含 ${lastSystem.measures.length} 个小节`);
-        } else {
-            // 如果当前系统就是最后一个系统，暂时保留这个小节
-            // 但这种情况不应该发生，因为如果当前系统是最后一个，它不应该检测到换行
-            console.warn(`系统 ${systemIndex} 是最后一个系统，但检测到换行，将小节 ${removedMeasure.getAttribute('number')} 保留在当前系统`);
-            system.measures.push(removedMeasure);
-            system.endMeasure = removedMeasure;
-        }
+        // 如果没有下一个系统，创建新系统
+        const newSystemIndex = systems.length;
+        systems.push({
+            index: newSystemIndex,
+            measures: [removedMeasure],
+            startMeasure: removedMeasure,
+            endMeasure: removedMeasure
+        });
+        measureToSystemMap.set(removedMeasureNum, newSystemIndex);
+        console.log(`没有下一个系统，创建新系统 ${newSystemIndex} 来容纳小节 ${removedMeasureNum}`);
     }
     
     // 更新全局systems引用
@@ -732,7 +991,13 @@ async function createAndRenderSystem(systemIndex) {
     infoDiv.className = 'system-info';
     const startMeasure = parseInt(system.startMeasure.getAttribute('number'));
     const endMeasure = parseInt(system.endMeasure.getAttribute('number'));
-    infoDiv.textContent = `系统 ${systemIndex + 1} - 小节 ${startMeasure} 到 ${endMeasure}`;
+    
+    // 如果是新章节，添加提示
+    let infoText = `系统 ${systemIndex + 1} - 小节 ${startMeasure} 到 ${endMeasure}`;
+    if (system.isNewPiece) {
+        infoText = `系统 ${systemIndex + 1} - 【新章节】小节 ${startMeasure} 到 ${endMeasure}`;
+    }
+    infoDiv.textContent = infoText;
     rowDiv.appendChild(infoDiv);
     
     // 乐谱容器
@@ -749,8 +1014,9 @@ async function createAndRenderSystem(systemIndex) {
     
     contentDiv.appendChild(rowDiv);
     
-    // 渲染乐谱和图表
-    await renderSystem(systemIndex);
+    // 渲染乐谱和图表，返回是否成功
+    const success = await renderSystem(systemIndex);
+    return success;
 }
 
 // 渲染所有系统（带自动换行检测）
@@ -761,16 +1027,255 @@ async function renderAllSystems() {
     let systemIndex = 0;
     const maxIterations = 100; // 防止无限循环
     let iteration = 0;
+    const maxMeasureNum = window.maxMeasureNumber || 131; // 最大小节号，默认131
     
     while (systemIndex < systems.length && iteration < maxIterations) {
         iteration++;
         
-        // 创建并渲染当前系统
-        await createAndRenderSystem(systemIndex);
+        // 检查当前系统是否包含最大小节号，如果包含或超过则停止渲染
+        const system = systems[systemIndex];
+        if (system) {
+            const systemStartMeasure = parseInt(system.startMeasure.getAttribute('number'));
+            const systemEndMeasure = parseInt(system.endMeasure.getAttribute('number'));
+            
+            // 如果系统开始小节号已经超过131，不渲染，直接停止
+            if (systemStartMeasure > maxMeasureNum) {
+                console.log(`系统 ${systemIndex}: 开始小节号 ${systemStartMeasure} 已超过最大小节号 ${maxMeasureNum}，停止渲染`);
+                break;
+            }
+            
+            // 如果系统结束小节号达到或超过131，渲染完这个系统后停止
+            if (systemEndMeasure >= maxMeasureNum) {
+                console.log(`系统 ${systemIndex}: 结束小节号 ${systemEndMeasure} 达到最大小节号 ${maxMeasureNum}，渲染后停止`);
+                // 渲染当前系统
+                await createAndRenderSystem(systemIndex);
+                // 等待渲染完成
+                await new Promise(resolve => setTimeout(resolve, 500));
+                break; // 停止渲染后续系统
+            }
+        }
+        
+        // 创建并渲染当前系统（带超时保护）
+        let renderSuccess = false;
+        try {
+            // 设置超时：如果5秒内没有完成，认为失败
+            const renderPromise = createAndRenderSystem(systemIndex);
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('渲染超时')), 5000)
+            );
+            
+            renderSuccess = await Promise.race([renderPromise, timeoutPromise]);
+        } catch (error) {
+            console.error(`系统 ${systemIndex} 渲染超时或出错:`, error);
+            renderSuccess = false;
+        }
         
         // 等待一小段时间确保渲染完成
         await new Promise(resolve => setTimeout(resolve, 500));
         
+        // 验证乐谱是否正确渲染（小节数量是否正确）
+        // renderSystem内部已经验证，但这里再次验证以确保
+        const scoreValid = validateScoreRendering(systemIndex);
+        
+        if (!renderSuccess || !scoreValid) {
+            console.log(`系统 ${systemIndex} 乐谱渲染或验证失败（renderSuccess: ${renderSuccess}, scoreValid: ${scoreValid}），调整小节数量...`);
+            
+            // 获取当前系统对象
+            const system = systems[systemIndex];
+            if (!system) {
+                console.warn(`系统 ${systemIndex}: 系统不存在，跳过`);
+                systemIndex++;
+                continue;
+            }
+            
+            // 检查系统是否包含最大小节号（第一个曲子的结束），如果是，不应该调整
+            const maxMeasureNum = window.maxMeasureNumber;
+            const systemEndMeasure = parseInt(system.endMeasure.getAttribute('number'));
+            if (maxMeasureNum && systemEndMeasure === maxMeasureNum) {
+                console.log(`系统 ${systemIndex}: 包含最大小节号 ${maxMeasureNum}，不应该调整，跳过`);
+                systemIndex++;
+                continue;
+            }
+            
+            // 安全检查：如果系统小节数异常多（超过初始小节数的3倍），强制重置
+            const initialMeasures = window.initialMeasuresPerSystem || 7;
+            if (system.measures.length > initialMeasures * 3) {
+                console.error(`系统 ${systemIndex}: 小节数异常（${system.measures.length}个），强制重置为初始小节数 ${initialMeasures}`);
+                
+                // 检查小节是否连续，如果不连续，按小节号排序
+                const allMeasures = Array.from(system.measures);
+                allMeasures.sort((a, b) => {
+                    const numA = parseInt(a.getAttribute('number'));
+                    const numB = parseInt(b.getAttribute('number'));
+                    return numA - numB;
+                });
+                
+                // 检查小节是否连续
+                let isContinuous = true;
+                for (let i = 1; i < allMeasures.length; i++) {
+                    const prevNum = parseInt(allMeasures[i - 1].getAttribute('number'));
+                    const currNum = parseInt(allMeasures[i].getAttribute('number'));
+                    if (currNum !== prevNum + 1) {
+                        isContinuous = false;
+                        console.warn(`系统 ${systemIndex}: 小节不连续！小节 ${prevNum} 和 ${currNum} 之间有间隔`);
+                        break;
+                    }
+                }
+                
+                // 只保留前initialMeasures个连续的小节
+                // 找到第一个连续的小节序列
+                let startIdx = 0;
+                let maxContinuousLength = 1;
+                let bestStartIdx = 0;
+                
+                for (let i = 1; i < allMeasures.length; i++) {
+                    const prevNum = parseInt(allMeasures[i - 1].getAttribute('number'));
+                    const currNum = parseInt(allMeasures[i].getAttribute('number'));
+                    if (currNum === prevNum + 1) {
+                        maxContinuousLength++;
+                    } else {
+                        if (maxContinuousLength >= initialMeasures) {
+                            bestStartIdx = startIdx;
+                            break;
+                        }
+                        startIdx = i;
+                        maxContinuousLength = 1;
+                    }
+                }
+                
+                // 如果找到足够长的连续序列，使用它；否则使用前initialMeasures个
+                if (maxContinuousLength >= initialMeasures) {
+                    system.measures = allMeasures.slice(bestStartIdx, bestStartIdx + initialMeasures);
+                } else {
+                    system.measures = allMeasures.slice(0, initialMeasures);
+                }
+                system.startMeasure = system.measures[0];
+                system.endMeasure = system.measures[system.measures.length - 1];
+                
+                // 更新映射：移除超出的小节
+                for (let i = 0; i < allMeasures.length; i++) {
+                    const measureNum = parseInt(allMeasures[i].getAttribute('number'));
+                    if (!system.measures.includes(allMeasures[i])) {
+                        measureToSystemMap.delete(measureNum);
+                    }
+                }
+                
+                // 更新映射：确保保留的小节正确映射
+                system.measures.forEach(m => {
+                    measureToSystemMap.set(parseInt(m.getAttribute('number')), systemIndex);
+                });
+                
+                // 将超出的小节按顺序合并创建新系统
+                const remainingMeasures = allMeasures.filter(m => !system.measures.includes(m));
+                if (remainingMeasures.length > 0) {
+                    // 将剩余小节分组，每组最多initialMeasures个小节
+                    for (let i = 0; i < remainingMeasures.length; i += initialMeasures) {
+                        const groupMeasures = remainingMeasures.slice(i, i + initialMeasures);
+                        const newSystemIndex = systems.length;
+                        systems.push({
+                            index: newSystemIndex,
+                            measures: groupMeasures,
+                            startMeasure: groupMeasures[0],
+                            endMeasure: groupMeasures[groupMeasures.length - 1]
+                        });
+                        groupMeasures.forEach(m => {
+                            measureToSystemMap.set(parseInt(m.getAttribute('number')), newSystemIndex);
+                        });
+                        const startNum = parseInt(groupMeasures[0].getAttribute('number'));
+                        const endNum = parseInt(groupMeasures[groupMeasures.length - 1].getAttribute('number'));
+                        console.log(`创建新系统 ${newSystemIndex}，包含 ${groupMeasures.length} 个小节（小节 ${startNum} 到 ${endNum}）`);
+                    }
+                }
+                
+                window.systems = systems;
+                const startNum = parseInt(system.startMeasure.getAttribute('number'));
+                const endNum = parseInt(system.endMeasure.getAttribute('number'));
+                console.log(`系统 ${systemIndex}: 已重置为 ${system.measures.length} 个小节（小节 ${startNum} 到 ${endNum}），超出的小节已创建新系统`);
+                
+                // 清除当前系统的容器，重新渲染
+                const rowDiv = document.getElementById(`system-${systemIndex}`);
+                if (rowDiv) {
+                    const chartDiv = document.getElementById(`chart-${systemIndex}`);
+                    if (chartDiv) {
+                        const canvas = chartDiv.querySelector('canvas');
+                        if (canvas) {
+                            const chartInstance = Chart.getChart(canvas);
+                            if (chartInstance) {
+                                chartInstance.destroy();
+                            }
+                        }
+                    }
+                    rowDiv.remove();
+                }
+                delete window[`systemMeasurePositions_${systemIndex}`];
+                delete window[`systemMinima_${systemIndex}`];
+                
+                // 重新渲染当前系统
+                continue;
+            }
+            
+            // 如果系统只有1个小节，无法再减少，直接跳过
+            if (system.measures.length <= 1) {
+                console.warn(`系统 ${systemIndex}: 只有 ${system.measures.length} 个小节，无法再减少，跳过验证`);
+                systemIndex++;
+                continue;
+            }
+            
+            // 调整系统的小节数量（减少1个）
+            const adjusted = adjustSystemMeasures(systemIndex);
+            
+            if (adjusted) {
+                // 清除当前系统的容器和缓存（包括图表）
+                const rowDiv = document.getElementById(`system-${systemIndex}`);
+                if (rowDiv) {
+                    // 清除图表实例（如果存在）
+                    const chartDiv = document.getElementById(`chart-${systemIndex}`);
+                    if (chartDiv) {
+                        const canvas = chartDiv.querySelector('canvas');
+                        if (canvas) {
+                            const chartInstance = Chart.getChart(canvas);
+                            if (chartInstance) {
+                                chartInstance.destroy();
+                            }
+                        }
+                    }
+                    rowDiv.remove();
+                }
+                delete window[`systemMeasurePositions_${systemIndex}`];
+                delete window[`systemMinima_${systemIndex}`];
+                
+                // 如果调整后创建了新系统，也需要清除后续系统的容器和图表
+                for (let i = systemIndex + 1; i < systems.length; i++) {
+                    const nextRowDiv = document.getElementById(`system-${i}`);
+                    if (nextRowDiv) {
+                        // 清除图表实例
+                        const chartDiv = document.getElementById(`chart-${i}`);
+                        if (chartDiv) {
+                            const canvas = chartDiv.querySelector('canvas');
+                            if (canvas) {
+                                const chartInstance = Chart.getChart(canvas);
+                                if (chartInstance) {
+                                    chartInstance.destroy();
+                                }
+                            }
+                        }
+                        nextRowDiv.remove();
+                    }
+                    delete window[`systemMeasurePositions_${i}`];
+                    delete window[`systemMinima_${i}`];
+                }
+                
+                // 不增加systemIndex，重新渲染当前系统（包括乐谱和图表）
+                continue;
+            } else {
+                // 如果无法调整，跳过这个系统
+                console.warn(`系统 ${systemIndex}: 无法调整小节数量，跳过`);
+                systemIndex++;
+                continue;
+            }
+        }
+        
+        // 只有在乐谱验证通过后才检测换行
         // 检测是否有换行
         const hasLineBreak = detectLineBreak(systemIndex);
         
@@ -837,12 +1342,109 @@ async function renderAllSystems() {
     console.log(`渲染完成，共 ${systems.length} 个系统，每个系统使用独立的x轴范围`);
 }
 
+// 验证乐谱是否正确渲染
+function validateScoreRendering(systemIndex) {
+    const system = systems[systemIndex];
+    if (!system) {
+        console.warn(`系统 ${systemIndex}: 系统不存在`);
+        return false;
+    }
+    
+    const scoreDiv = document.getElementById(`score-${systemIndex}`);
+    if (!scoreDiv) {
+        console.warn(`系统 ${systemIndex}: 乐谱容器不存在`);
+        return false;
+    }
+    
+    const svg = scoreDiv.querySelector('svg');
+    if (!svg) {
+        console.warn(`系统 ${systemIndex}: SVG不存在，乐谱可能未渲染`);
+        return false;
+    }
+    
+    // 检查SVG是否有内容
+    try {
+        const svgBbox = svg.getBBox();
+        if (svgBbox.width === 0 || svgBbox.height === 0) {
+            console.warn(`系统 ${systemIndex}: SVG尺寸为0，乐谱可能未正确渲染`);
+            return false;
+        }
+    } catch (e) {
+        console.warn(`系统 ${systemIndex}: 无法获取SVG边界框`);
+        return false;
+    }
+    
+    // 验证小节数量是否正确
+    const expectedMeasures = system.measures.length;
+    const measurePositions = window[`systemMeasurePositions_${systemIndex}`];
+    
+    // 获取容器和SVG信息用于调试
+    const containerWidth = scoreDiv.offsetWidth;
+    const svgBbox = svg.getBBox();
+    const svgWidth = svgBbox.width;
+    const svgHeight = svgBbox.height;
+    
+    if (measurePositions && measurePositions.length > 0) {
+        const detectedMeasures = measurePositions.length;
+        if (detectedMeasures !== expectedMeasures) {
+            console.warn(`系统 ${systemIndex}: 小节数量不匹配！期望 ${expectedMeasures} 个，检测到 ${detectedMeasures} 个 (SVG: ${svgWidth}x${svgHeight}px, 容器: ${containerWidth}px)`);
+            return false;
+        }
+        
+        // 验证小节编号是否连续且正确
+        const startMeasure = parseInt(system.startMeasure.getAttribute('number'));
+        const endMeasure = parseInt(system.endMeasure.getAttribute('number'));
+        
+        const measureNumbers = measurePositions.map(p => p.measureNumber).sort((a, b) => a - b);
+        const expectedMeasureNumbers = [];
+        for (let m = startMeasure; m <= endMeasure; m++) {
+            expectedMeasureNumbers.push(m);
+        }
+        
+        if (measureNumbers.length !== expectedMeasureNumbers.length) {
+            console.warn(`系统 ${systemIndex}: 小节编号数量不匹配 (期望: ${expectedMeasureNumbers.length}, 实际: ${measureNumbers.length})`);
+            return false;
+        }
+        
+        for (let i = 0; i < measureNumbers.length; i++) {
+            if (measureNumbers[i] !== expectedMeasureNumbers[i]) {
+                console.warn(`系统 ${systemIndex}: 小节编号不匹配，位置 ${i}: 期望 ${expectedMeasureNumbers[i]}，实际 ${measureNumbers[i]}`);
+                return false;
+            }
+        }
+        
+        // 额外检查：如果小节数较多且SVG宽度明显超出容器，即使小节数量匹配，也可能有换行
+        if (expectedMeasures > 5 && containerWidth > 0 && svgWidth > containerWidth * 1.1) {
+            console.warn(`系统 ${systemIndex}: 小节数量匹配但SVG宽度超出容器 (小节数: ${expectedMeasures}, SVG: ${svgWidth}px, 容器: ${containerWidth}px)，可能换行`);
+            return false;
+        }
+        
+        console.log(`系统 ${systemIndex}: 乐谱验证通过，${detectedMeasures} 个小节正确渲染 (SVG: ${svgWidth}x${svgHeight}px)`);
+        return true;
+    } else {
+        console.warn(`系统 ${systemIndex}: 未检测到小节位置信息 (SVG: ${svgWidth}x${svgHeight}px)`);
+        return false;
+    }
+}
+
 // 渲染单个系统
 async function renderSystem(systemIndex) {
     const system = systems[systemIndex];
     
     // 渲染乐谱，并获取小节位置信息
     const measurePositions = await renderScore(systemIndex);
+    
+    // 验证乐谱是否正确渲染
+    const isValid = validateScoreRendering(systemIndex);
+    
+    if (!isValid) {
+        console.error(`系统 ${systemIndex}: 乐谱渲染验证失败，跳过图表渲染`);
+        const chartDiv = document.getElementById(`chart-${systemIndex}`);
+        if (chartDiv) {
+            chartDiv.innerHTML = '<div style="color: orange; padding: 10px;">等待乐谱正确渲染...</div>';
+        }
+        return false; // 返回false表示渲染失败
+    }
     
     // 对齐图表位置到乐谱的起始位置（在渲染图表之前）
     alignChartToScore(systemIndex);
@@ -852,6 +1454,8 @@ async function renderSystem(systemIndex) {
     
     // 渲染折线图，传入小节位置信息用于对齐
     renderChart(systemIndex, null, measurePositions);
+    
+    return true; // 返回true表示渲染成功
 }
 
 // 检测乐谱中第一个和最后一个音符的位置
@@ -1218,13 +1822,44 @@ async function renderScore(systemIndex) {
         osmd.render();
         
         // 等待渲染完成后检测小节位置
+        // 使用多次尝试，确保检测到小节位置
         return new Promise((resolve) => {
-            setTimeout(() => {
+            let attempts = 0;
+            const maxAttempts = 3;
+            const attemptDelay = 1000; // 每次尝试间隔1秒
+            
+            const tryDetect = () => {
+                attempts++;
                 const measurePositions = detectMeasurePositions(systemIndex);
+                
                 // 存储小节位置信息
                 window[`systemMeasurePositions_${systemIndex}`] = measurePositions;
-                resolve(measurePositions);
-            }, 1000);
+                
+                // 验证检测到的小节数量
+                const expectedMeasures = system.measures.length;
+                const detectedMeasures = measurePositions ? measurePositions.length : 0;
+                
+                // 放宽条件：只要检测到至少一半的小节，就认为成功
+                const minRequiredMeasures = Math.max(1, Math.floor(expectedMeasures * 0.5));
+                
+                if (detectedMeasures >= minRequiredMeasures || attempts >= maxAttempts) {
+                    if (detectedMeasures === expectedMeasures) {
+                        console.log(`系统 ${systemIndex}: 成功检测到所有 ${detectedMeasures} 个小节位置（尝试 ${attempts} 次）`);
+                    } else if (detectedMeasures >= minRequiredMeasures) {
+                        console.warn(`系统 ${systemIndex}: 检测到 ${detectedMeasures}/${expectedMeasures} 个小节位置（尝试 ${attempts} 次，至少需要 ${minRequiredMeasures} 个）`);
+                    } else {
+                        console.warn(`系统 ${systemIndex}: 小节位置检测不完整，期望 ${expectedMeasures} 个，检测到 ${detectedMeasures} 个（尝试 ${attempts} 次后放弃）`);
+                    }
+                    resolve(measurePositions);
+                } else {
+                    // 继续尝试
+                    console.log(`系统 ${systemIndex}: 小节检测不完整（${detectedMeasures}/${expectedMeasures}），${attemptDelay}ms后重试...`);
+                    setTimeout(tryDetect, attemptDelay);
+                }
+            };
+            
+            // 第一次尝试
+            setTimeout(tryDetect, 1000);
         });
         
     } catch (error) {
